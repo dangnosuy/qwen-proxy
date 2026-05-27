@@ -1,6 +1,6 @@
 import unittest
 
-from qwen_proxy.server import flatten_messages
+from qwen_proxy.server import _sanitize_assistant_text, flatten_messages
 
 
 class PromptRenderingTests(unittest.TestCase):
@@ -33,11 +33,38 @@ class PromptRenderingTests(unittest.TestCase):
             },
         }])
 
-        self.assertIn("<|DSML|tool_calls>", prompt)
-        self.assertIn('<|DSML|invoke name="browser_open">', prompt)
+        self.assertIn("<tool_calls>", prompt)
+        self.assertIn('<invoke name="browser_open">', prompt)
         self.assertIn("Tool name: browser_open", prompt)
         self.assertIn("Result:\nopened", prompt)
-        self.assertIn("call exactly one next tool", prompt)
+        self.assertIn("request exactly one next client capability", prompt)
+        self.assertNotIn("call the tool NOW", prompt)
+
+    def test_tool_result_tail_reminder_prefers_answering(self):
+        prompt = flatten_messages([
+            {"role": "user", "content": "what time is it?"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_time", "arguments": "{}"},
+                }],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "10:30"},
+        ], tools=[{
+            "type": "function",
+            "function": {
+                "name": "get_time",
+                "description": "Get time",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }])
+
+        self.assertIn("You just received a tool result", prompt)
+        self.assertIn("Use it to answer normally", prompt)
+        self.assertNotIn("call the tool NOW", prompt)
 
     def test_renders_tool_choice_required(self):
         prompt = flatten_messages([
@@ -51,7 +78,7 @@ class PromptRenderingTests(unittest.TestCase):
             },
         }], tool_choice="required")
 
-        self.assertIn("Tool choice: you MUST call one of the available tools.", prompt)
+        self.assertIn("Tool choice: you MUST serialize one available client capability request.", prompt)
 
     def test_renders_forced_tool_choice(self):
         prompt = flatten_messages([
@@ -65,7 +92,84 @@ class PromptRenderingTests(unittest.TestCase):
             },
         }], tool_choice={"type": "function", "function": {"name": "browser_open"}})
 
-        self.assertIn("Tool choice: you MUST call the tool named browser_open.", prompt)
+        self.assertIn("Tool choice: you MUST serialize a request for the client capability named browser_open.", prompt)
+
+    def test_auto_tool_reminder_does_not_force_tool_call_now(self):
+        prompt = flatten_messages([
+            {"role": "user", "content": "hello"},
+        ], tools=[{
+            "type": "function",
+            "function": {
+                "name": "run_shell_command",
+                "description": "Run command",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }])
+
+        self.assertIn("If the next step requires an action", prompt)
+        self.assertIn("If no action is needed, answer normally", prompt)
+        self.assertNotIn("call the tool NOW", prompt)
+
+    def test_web_search_request_gets_explicit_tool_hint(self):
+        prompt = flatten_messages([
+            {"role": "user", "content": "lên google tìm vnexpress bài mới nhất"},
+        ], tools=[{
+            "type": "function",
+            "function": {
+                "name": "WebSearch",
+                "description": "Search the web",
+                "parameters": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {"query": {"type": "string"}},
+                },
+            },
+        }])
+
+        self.assertIn("The latest user request is a web search", prompt)
+        self.assertIn("Use WebSearch first", prompt)
+        self.assertIn("Do not answer from memory", prompt)
+
+    def test_empty_web_search_result_gets_one_retry_hint(self):
+        prompt = flatten_messages([
+            {"role": "user", "content": "google tìm vnexpress bài mới nhất"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "WebSearch", "arguments": '{"query":"vnexpress bài mới nhất"}'},
+                }],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "Did 0 searches in 4s"},
+        ], tools=[{
+            "type": "function",
+            "function": {
+                "name": "WebSearch",
+                "description": "Search the web",
+                "parameters": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {"query": {"type": "string"}},
+                },
+            },
+        }])
+
+        self.assertIn("Retry WebSearch once", prompt)
+        self.assertIn("broader query", prompt)
+        self.assertIn("Do not use other capability names", prompt)
+
+    def test_sanitizes_tool_does_not_exist_artifact_from_text(self):
+        cleaned = _sanitize_assistant_text(
+            "Tool mcp__fetch__fetch does not exists.Dưới đây là kết quả.",
+            tools=[{
+                "type": "function",
+                "function": {"name": "mcp__fetch__fetch", "parameters": {"type": "object"}},
+            }],
+        )
+
+        self.assertEqual(cleaned, "Dưới đây là kết quả.")
 
 
 if __name__ == "__main__":

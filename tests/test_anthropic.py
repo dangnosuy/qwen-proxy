@@ -92,9 +92,12 @@ class AnthropicAdapterTests(unittest.TestCase):
         }).decode()
 
         self.assertIn("event: content_block_start", raw)
+        self.assertIn("event: content_block_delta", raw)
         self.assertIn('"type": "tool_use"', raw)
+        self.assertIn('"input": {}', raw)
+        self.assertIn('"type": "input_json_delta"', raw)
+        self.assertIn('"partial_json": "{\\"command\\": \\"date\\"}"', raw)
         self.assertIn('"name": "run_shell_command"', raw)
-        self.assertIn('"command": "date"', raw)
 
 
 if __name__ == "__main__":

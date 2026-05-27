@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from qwen_proxy import toolcall
+from qwen_proxy.logging_utils import log_event
 
 
 TOOL_MARKER_RE = re.compile(
@@ -32,10 +33,12 @@ class ToolStreamEvent:
 
 
 class ToolStreamSieve:
-    def __init__(self, tools: list[dict[str, Any]] | None = None):
+    def __init__(self, tools: list[dict[str, Any]] | None = None, context: str = ""):
         self.tools = tools
+        self.context = context
         self.buffer = ""
         self.tool_emitted = False
+        self.dropped_markup = ""
 
     def feed(self, chunk: str) -> list[ToolStreamEvent]:
         if not chunk:
@@ -55,7 +58,7 @@ class ToolStreamSieve:
     def _drain(self, final: bool) -> list[ToolStreamEvent]:
         events: list[ToolStreamEvent] = []
         normalized = toolcall._normalize_markup_chars(self.buffer)
-        calls = toolcall.parse_tool_calls(normalized, self.tools)
+        calls = toolcall.parse_tool_calls(normalized, self.tools, allow_incomplete=final, context=self.context)
         if calls:
             prefix = _prefix_before_tool_marker(normalized)
             if prefix:
@@ -73,7 +76,11 @@ class ToolStreamSieve:
                 events.append(ToolStreamEvent(content=prefix))
             if final:
                 # Avoid exposing malformed tool markup as user-visible text.
-                if not _looks_like_tool_markup(normalized):
+                if _looks_like_tool_markup(normalized):
+                    self.dropped_markup = normalized
+                    log_event("sieve_drop", chars=len(normalized),
+                              preview=normalized[:500])
+                else:
                     events.append(ToolStreamEvent(content=normalized))
                 self.buffer = ""
             return events

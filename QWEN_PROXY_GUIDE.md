@@ -23,6 +23,12 @@ Mỗi model có 3 chế độ thinking:
 | `qwen3.6-plus` | Auto | Model tự quyết có cần suy luận hay không |
 | `qwen3.6-plus-thinking` | Luôn bật | Luôn suy luận trước khi trả lời |
 | `qwen3.6-plus-fast` | Tắt | Trả lời ngay, nhanh nhất |
+| `qwen3.7-max` | Auto | Flagship Qwen3.7, text-only, mạnh cho reasoning/coding |
+| `qwen3.7-max-thinking` | Luôn bật | Qwen3.7 Max + luôn suy luận |
+| `qwen3.7-max-fast` | Tắt | Qwen3.7 Max + nhanh |
+| `qwen3.7-plus` | Auto | Qwen3.7 Plus khi tài khoản/region được rollout |
+| `qwen3.7-plus-thinking` | Luôn bật | Qwen3.7 Plus + luôn suy luận |
+| `qwen3.7-plus-fast` | Tắt | Qwen3.7 Plus + nhanh |
 | `qwen3.6-max-preview` | Auto | Flagship, mạnh nhất |
 | `qwen3.6-max-preview-thinking` | Luôn bật | Flagship + luôn suy luận |
 | `qwen3.6-max-preview-fast` | Tắt | Flagship + nhanh |

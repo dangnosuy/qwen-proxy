@@ -242,6 +242,7 @@ def stream_tool_use_block(index: int, tc: dict[str, Any]) -> bytes:
         input_obj = json.loads(args) if isinstance(args, str) else args
     except json.JSONDecodeError:
         input_obj = {"arguments": args}
+    input_json = json.dumps(input_obj or {}, ensure_ascii=False)
     return sse_event("content_block_start", {
         "type": "content_block_start",
         "index": index,
@@ -249,8 +250,12 @@ def stream_tool_use_block(index: int, tc: dict[str, Any]) -> bytes:
             "type": "tool_use",
             "id": tc.get("id") or f"call_{uuid.uuid4().hex[:12]}",
             "name": fn.get("name", ""),
-            "input": input_obj or {},
+            "input": {},
         },
+    }) + sse_event("content_block_delta", {
+        "type": "content_block_delta",
+        "index": index,
+        "delta": {"type": "input_json_delta", "partial_json": input_json},
     }) + sse_event("content_block_stop", {"type": "content_block_stop", "index": index})
 
 

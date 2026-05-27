@@ -2,7 +2,7 @@
 
 Reverse proxy biến **Qwen Chat website** (`chat.qwen.ai`) thành **OpenAI-compatible API** — zero dependencies, chỉ dùng Python stdlib.
 
-Dùng Qwen models (qwen3.6-plus, qwen3.6-max, qwen3.6-27b) với bất kỳ công cụ nào hỗ trợ OpenAI API: Claude Code, Cursor, Continue, aider, LiteLLM, Open WebUI, v.v.
+Dùng Qwen models (qwen3.7-max, qwen3.7-plus, qwen3.6-plus, qwen3.6-max, qwen3.6-27b) với bất kỳ công cụ nào hỗ trợ OpenAI API: Claude Code, Cursor, Continue, aider, LiteLLM, Open WebUI, v.v.
 
 ## Tính năng
 
@@ -60,6 +60,12 @@ Mỗi model có 3 chế độ:
 
 | Model | Mode | Mô tả |
 |---|---|---|
+| `qwen3.7-max` | Auto | Flagship Qwen3.7, text-only, mạnh nhất cho reasoning/coding |
+| `qwen3.7-max-thinking` | Thinking | Qwen3.7 Max + luôn suy luận |
+| `qwen3.7-max-fast` | Fast | Qwen3.7 Max + tắt thinking |
+| `qwen3.7-plus` | Auto | Qwen3.7 Plus khi tài khoản/region được rollout |
+| `qwen3.7-plus-thinking` | Thinking | Qwen3.7 Plus + luôn suy luận |
+| `qwen3.7-plus-fast` | Fast | Qwen3.7 Plus + tắt thinking |
 | `qwen3.6-plus` | Auto | Model tự quyết có thinking hay không |
 | `qwen3.6-plus-thinking` | Thinking | Luôn suy luận trước khi trả lời |
 | `qwen3.6-plus-fast` | Fast | Trả lời ngay, nhanh nhất |
