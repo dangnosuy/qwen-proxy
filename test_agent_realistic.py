@@ -245,8 +245,8 @@ if r1["tool_calls"]:
         {"role": "system", "content": AGENT_SYSTEM_PROMPT},
         {"role": "user", "content": "trong thư mục /home/dangnosuy/kaggle có những file gì?"},
         {"role": "assistant", "content": None, "tool_calls": [tc1]},
-        {"role": "tool", "tool_call_id": tc1.get("id", "call_1"), "content": "qwen_proxy/\nqwen_proxy/qwen_proxy.py\nqwen_proxy/qwen_debug.py\nqwen_proxy/qwen_research.py\nqwen_proxy/QWEN_API_RESEARCH.md\nqwen_proxy/QWEN_PROXY_GUIDE.md\nqwen_proxy/test_tool_calling.py\nqwen_proxy/test_agent_realistic.py"},
-        {"role": "user", "content": "đọc file qwen_proxy/qwen_proxy.py cho tôi"},
+        {"role": "tool", "tool_call_id": tc1.get("id", "call_1"), "content": "qwen_proxy/\nqwen_proxy/qwen_proxy.py\nqwen_proxy/qwen_proxy_raw.py\nqwen_proxy/qwen_debug.py\nqwen_proxy/qwen_research.py\nqwen_proxy/QWEN_API_RESEARCH.md\nqwen_proxy/QWEN_PROXY_GUIDE.md\nqwen_proxy/test_tool_calling.py\nqwen_proxy/test_agent_realistic.py"},
+        {"role": "user", "content": "đọc file qwen_proxy/qwen_proxy_raw.py cho tôi"},
     ])
     print(f"  Turn 2 finish: {r2['finish_reason']}")
     if r2["tool_calls"]:

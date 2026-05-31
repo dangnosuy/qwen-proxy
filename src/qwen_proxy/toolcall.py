@@ -74,8 +74,8 @@ def infer_tool_calls_from_context(
     if not tool_names:
         return None
 
-    text = f"{context}\n{model_text}"
-    lowered = text.lower()
+    lowered_context = context.lower()
+    failed_tool_text = _looks_like_failed_tool_text(model_text)
 
     # Robust skill-loaded detection: check multiple markers that indicate
     # the Skill tool was already called in this conversation.
@@ -88,18 +88,25 @@ def infer_tool_calls_from_context(
         'invoke name="skill"',      # From DSML in conversation history
         '"name": "skill"',          # From JSON tool call in history
     )
-    skill_loaded = any(marker in lowered for marker in _SKILL_LOADED_MARKERS)
+    skill_loaded = any(marker in lowered_context for marker in _SKILL_LOADED_MARKERS)
 
     skill_tool_name = _find_tool_name(tool_names, "skill")
     if not skill_loaded and skill_tool_name:
-        skill_name = _infer_skill_name(text)
+        # Prefer model_text to avoid loops. If the model explicitly failed to
+        # call tools, allow context recovery because that is the retry path.
+        skill_source = model_text if not failed_tool_text else f"{model_text}\n{context}"
+        skill_name = _infer_skill_name(skill_source)
         if skill_name:
             return [_format_openai_tool_call({
                 "name": skill_tool_name,
                 "arguments": _skill_arguments_for_tools(tools, skill_name),
             })]
 
-    url = _first_url(text)
+    # URL recovery is intentionally only allowed on explicit tool-miss retry
+    # paths. Final answers and file-content audits often mention example/IOC
+    # URLs; converting those into browser navigation is worse than missing a
+    # recovery opportunity.
+    url = _first_url(context) if failed_tool_text else None
     if url:
         if "mcp__playwright__browser_navigate" in tool_names:
             return [_format_openai_tool_call({
@@ -160,9 +167,14 @@ def _parse_xml_tool_calls(text: str, *, allow_incomplete: bool = True) -> list[d
             continue
         args: dict[str, Any] = {}
         for param in invoke:
-            if _local_name(param.tag) != "parameter":
-                continue
-            pname = html.unescape((param.attrib.get("name") or "").strip())
+            tag_name = _local_name(param.tag)
+            if tag_name == "parameter":
+                pname = html.unescape((param.attrib.get("name") or "").strip())
+            else:
+                # Qwen3.7 occasionally emits direct argument tags inside
+                # <invoke>, e.g. <new_string>...</new_string>, instead of
+                # <parameter name="new_string">...</parameter>.
+                pname = tag_name
             if not pname:
                 continue
             args[pname] = _parse_parameter_value(param)
@@ -284,6 +296,19 @@ def _extract_parameters_from_broken_block(block: str) -> dict[str, Any]:
             value = cdata.group(1)
         else:
             value = html.unescape(raw).strip()
+        if value:
+            args[pname] = value
+    for direct_match in re.finditer(
+        r'<\s*([A-Za-z_][\w.-]*)\b[^>]*>(.*?)(?:</\s*\1\s*>|</\s*parameter\s*>|$)',
+        block,
+        flags=re.DOTALL | re.IGNORECASE,
+    ):
+        pname = direct_match.group(1).strip()
+        if pname.lower() in {"parameter", "invoke", "tool_calls"} or pname in args:
+            continue
+        raw = direct_match.group(2) or ""
+        cdata = re.search(r'<!\[CDATA\[(.*?)(?:\]\]>|$)', raw, flags=re.DOTALL)
+        value = cdata.group(1) if cdata else html.unescape(raw).strip()
         if value:
             args[pname] = value
     return args
@@ -629,6 +654,32 @@ def _find_tool_name(tool_names: set[str], wanted: str) -> str | None:
         if name.lower() == wanted:
             return name
     return None
+
+
+def _looks_like_failed_tool_text(text: str) -> bool:
+    lowered = (text or "").lower()
+    if "tool " in lowered and ("does not exist" in lowered or "does not exists" in lowered):
+        return True
+    return any(
+        phrase in lowered
+        for phrase in ("i'm unable to", "i am unable to", "unable to access", "cannot access")
+    )
+
+
+def _looks_like_url_action(text: str) -> bool:
+    lowered = (text or "").lower()
+    if not _first_url(text):
+        return False
+    action_before_url = re.search(
+        r"\b(?:fetch|open|navigate|visit|browse|load|go\s+to)\b.{0,120}https?://",
+        lowered,
+        flags=re.DOTALL,
+    )
+    if action_before_url:
+        return True
+    if re.search(r"\bcurl\s+(?:-[^\s]+\s+)*https?://", lowered):
+        return True
+    return bool(re.search(r"(?:mở|truy cập|đọc trang).{0,120}https?://", lowered, flags=re.DOTALL))
 
 
 def _infer_skill_name(context: str) -> str | None:

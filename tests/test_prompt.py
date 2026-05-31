@@ -110,6 +110,63 @@ class PromptRenderingTests(unittest.TestCase):
         self.assertIn("If no action is needed, answer normally", prompt)
         self.assertNotIn("call the tool NOW", prompt)
 
+    def test_long_agent_system_prompt_is_not_compacted(self):
+        system = (
+            "You are Claude Code, Anthropic's official CLI for Claude.\n"
+            "Current working directory: /tmp/qwen_proxy_claude_stress_fixture\n"
+            "KEEP_THIS_TAIL_MARKER\n"
+            + ("tool_use function calling coding assistant " * 120)
+            + "\nEND_OF_LONG_SYSTEM_PROMPT"
+        )
+        prompt = flatten_messages([
+            {"role": "system", "content": system},
+            {"role": "user", "content": "read notes/ops.md"},
+        ], tools=[{
+            "type": "function",
+            "function": {
+                "name": "Read",
+                "description": "Read a file",
+                "parameters": {
+                    "type": "object",
+                    "required": ["file_path"],
+                    "properties": {"file_path": {"type": "string"}},
+                },
+            },
+        }])
+
+        self.assertIn("Current working directory: /tmp/qwen_proxy_claude_stress_fixture", prompt)
+        self.assertIn("KEEP_THIS_TAIL_MARKER", prompt)
+        self.assertIn("END_OF_LONG_SYSTEM_PROMPT", prompt)
+        self.assertNotIn("System context truncated", prompt)
+        self.assertNotIn("CLI coding assistant. Follow the user's request", prompt)
+
+    def test_qwen_code_context_is_not_compacted(self):
+        context = (
+            "This is the Qwen Code. We are setting up the context for our chat.\n"
+            "Today's date is 2026-05-28.\n"
+            "My operating system is: Linux.\n"
+            "I'm currently working in the directory: /tmp/project.\n"
+            "KEEP_FULL_CONTEXT"
+        )
+        prompt = flatten_messages([
+            {"role": "user", "content": context},
+        ], tools=[{
+            "type": "function",
+            "function": {
+                "name": "Read",
+                "description": "Read a file",
+                "parameters": {
+                    "type": "object",
+                    "required": ["file_path"],
+                    "properties": {"file_path": {"type": "string"}},
+                },
+            },
+        }])
+
+        self.assertIn("This is the Qwen Code", prompt)
+        self.assertIn("KEEP_FULL_CONTEXT", prompt)
+        self.assertNotIn("Qwen Code session context initialized", prompt)
+
     def test_web_search_request_gets_explicit_tool_hint(self):
         prompt = flatten_messages([
             {"role": "user", "content": "lên google tìm vnexpress bài mới nhất"},
@@ -159,6 +216,63 @@ class PromptRenderingTests(unittest.TestCase):
         self.assertIn("Retry WebSearch once", prompt)
         self.assertIn("broader query", prompt)
         self.assertIn("Do not use other capability names", prompt)
+
+    def test_orphan_empty_web_search_result_is_recognized(self):
+        prompt = flatten_messages([
+            {"role": "user", "content": "kiểm tra chính sách macro hiện nay"},
+            {
+                "role": "tool",
+                "tool_call_id": "call_missing",
+                "content": (
+                    'Web search results for query: "Microsoft Office macro policy 2025"\n\n\n'
+                    "REMINDER: You MUST include the sources above in your response."
+                ),
+            },
+        ], tools=[{
+            "type": "function",
+            "function": {
+                "name": "WebSearch",
+                "description": "Search the web",
+                "parameters": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {"query": {"type": "string"}},
+                },
+            },
+        }])
+
+        self.assertIn("Retry WebSearch once", prompt)
+        self.assertNotIn("The latest user request is a web search", prompt)
+
+    def test_repeated_orphan_empty_web_search_results_stop_retrying(self):
+        prompt = flatten_messages([
+            {"role": "user", "content": "kiểm tra chính sách macro hiện nay"},
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": 'Web search results for query: "q1"\n\n\nREMINDER: cite sources.',
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_2",
+                "content": 'Web search results for query: "q2"\n\n\nREMINDER: cite sources.',
+            },
+        ], tools=[{
+            "type": "function",
+            "function": {
+                "name": "WebSearch",
+                "description": "Search the web",
+                "parameters": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {"query": {"type": "string"}},
+                },
+            },
+        }])
+
+        self.assertIn("already returned no results", prompt)
+        self.assertIn("Answer honestly", prompt)
+        self.assertNotIn("Retry WebSearch once", prompt)
 
     def test_sanitizes_tool_does_not_exist_artifact_from_text(self):
         cleaned = _sanitize_assistant_text(

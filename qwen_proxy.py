@@ -16,7 +16,7 @@ __version__ = "0.1.0"
 
 
 def main():
-    from qwen_proxy.server import main as server_main
+    from qwen_proxy.raw import main as server_main
 
     server_main()
 

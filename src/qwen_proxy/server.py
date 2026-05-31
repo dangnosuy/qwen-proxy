@@ -7,7 +7,7 @@ length monitoring, and structured JSON logging.
 Zero dependencies — chỉ dùng Python stdlib.
 
 Usage:
-    QWEN_JWT="eyJ..." python3 qwen_proxy/qwen_proxy.py [--port 8080] [--host 127.0.0.1]
+    QWEN_JWT="eyJ..." python3 qwen_proxy.py [--port 8080] [--host 127.0.0.1]
 """
 
 import argparse
@@ -36,10 +36,10 @@ QWEN_TIMEOUT = 180
 RETRY_ON_FAIL = os.environ.get("QWEN_RETRY_ON_FAIL", "0").strip() in {"1", "true", "yes"}
 TOOL_RECOVERY = os.environ.get("QWEN_TOOL_RECOVERY", "0").strip() in {"1", "true", "yes"}
 
-# Prompt length monitoring / auto-truncation (P2)
-# NOTE: Claude Code system prompt + tools = ~57K chars after compaction.
-# Only truncate for very long conversations. Qwen handles 100K+ fine.
-MAX_PROMPT_CHARS = int(os.environ.get("QWEN_MAX_PROMPT_CHARS", "200000"))
+# Prompt auto-truncation is disabled by default. Claude Code already manages
+# its context, and this proxy should primarily translate tool calls. Set
+# QWEN_MAX_PROMPT_CHARS to a positive value only if a specific upstream needs it.
+MAX_PROMPT_CHARS = int(os.environ.get("QWEN_MAX_PROMPT_CHARS", "0"))
 
 # Session reuse TTL in seconds (P2). 0 = disabled (original behavior).
 # Set to e.g. 600 to reuse sessions for 10 minutes.
@@ -133,91 +133,12 @@ def _truncate(text: str, limit: int) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
-def _compact_tool_description(name: str, desc: str) -> str:
-    desc = desc or ""
-    first_line = desc.strip().splitlines()[0] if desc.strip() else ""
-
-    preferred = {
-        "agent": "Launch a specialized sub-agent for a multi-step task.",
-        "task_stop": "Stop a running background task by task_id.",
-        "send_message": "Send a text message to a running background task.",
-        "skill": "Run a named skill before continuing when a relevant skill exists.",
-        "list_directory": "List files and directories in an absolute path.",
-        "read_file": "Read a file by absolute path, optionally with offset/limit.",
-        "grep_search": "Search file contents by regex.",
-        "glob": "Find files by glob pattern.",
-        "edit": "Edit an existing file.",
-        "write_file": "Write content to a file at an absolute path.",
-        "run_shell_command": "Run a shell command and return output.",
-        "todo_write": "Create or update the task todo list.",
-        "ask_user_question": "Ask the user for clarification when necessary.",
-        "exit_plan_mode": "Exit planning mode and continue execution.",
-        "web_fetch": "Fetch a webpage or URL and return processed content.",
-        "Skill": "Load a named skill. Always pass the exact skill id in the `skill` parameter.",
-    }
-    if name in preferred:
-        return preferred[name]
-    return _truncate(first_line or desc, 140)
+def _tool_description(name: str, desc: str) -> str:
+    return desc or ""
 
 
-def _compact_param_description(desc: str) -> str:
-    return _truncate(desc, 80)
-
-
-def _compact_system_message(content: str) -> str:
-    if content.startswith("You are Qwen Code, an interactive CLI agent"):
-        return (
-            "You are a CLI coding assistant. Follow the user's request, keep responses concise, "
-            "use absolute file paths, and use the provided tools for actions. "
-            "For any action involving files, shell, web access, planning, or delegation, "
-            "do not describe the action in prose; call the appropriate tool."
-        )
-    # Long agent system prompts (Claude Code, Cursor, etc.) overwhelm context
-    # and cause Qwen to ignore tool-call instructions placed at the top.
-    if len(content) > 2000 and _is_agent_system_prompt(content):
-        return (
-            "You are a CLI coding assistant. Follow the user's request precisely. "
-            "Use absolute file paths. For ANY action (reading, writing, editing files, "
-            "running commands, searching, browsing), ALWAYS call the appropriate tool. "
-            "Never describe what you plan to do — execute it by calling a tool. "
-            "Call one tool at a time, then wait for the result before proceeding."
-        )
-    # Truncate very long system prompts to preserve tool instruction visibility
-    if len(content) > 4000:
-        return content[:2000].rstrip() + "\n\n(System context truncated for efficiency.)"
-    return content
-
-
-def _is_agent_system_prompt(content: str) -> bool:
-    """Detect system prompts from AI coding agents (Claude Code, Cursor, etc.)."""
-    if len(content) < 500:
-        return False
-    head = content[:3000].lower()
-    markers = [
-        "you are claude", "made by anthropic", "claude code",
-        "you are cursor", "you are an ai assistant",
-        "tool_use", "function calling", "coding assistant",
-    ]
-    return sum(1 for m in markers if m in head) >= 2
-
-
-def _compact_user_context(content: str) -> str:
-    if not content.startswith("This is the Qwen Code. We are setting up the context for our chat."):
-        return content
-
-    kept = []
-    for line in content.splitlines():
-        line = line.strip()
-        if line.startswith("Today's date is "):
-            kept.append(line)
-        elif line.startswith("My operating system is:"):
-            kept.append(line)
-        elif line.startswith("I'm currently working in the directory:"):
-            kept.append(line)
-
-    if kept:
-        return "Qwen Code session context:\n" + "\n".join(kept)
-    return "Qwen Code session context initialized."
+def _param_description(desc: str) -> str:
+    return desc or ""
 
 
 def resolve_model(name: str) -> tuple[str, str]:
@@ -253,14 +174,14 @@ def format_tools_prompt(tools: list) -> str:
         fn = tool["function"]
         name = fn["name"]
         exact_names.append(name)
-        desc = _compact_tool_description(name, fn.get("description", ""))
+        desc = _tool_description(name, fn.get("description", ""))
         params = fn.get("parameters", {})
         props = params.get("properties", {})
         required = params.get("required", [])
         param_parts = []
         for pname, pinfo in props.items():
             ptype = pinfo.get("type", "string")
-            pdesc = _compact_param_description(pinfo.get("description", ""))
+            pdesc = _param_description(pinfo.get("description", ""))
             req = " (required)" if pname in required else ""
             param_parts.append(f"    - {pname}: {ptype}{req}{' — ' + pdesc if pdesc else ''}")
         lines.append(f"- {name}: {desc}")
@@ -382,6 +303,8 @@ def _last_tool_result(messages: list) -> tuple[str, str]:
             tool_call_id = msg.get("tool_call_id", "")
             last_name = tool_name_by_id.get(tool_call_id, "")
             last_result = _content_to_plain_text(msg.get("content", ""))
+            if not last_name and _looks_like_web_search_result(last_result):
+                last_name = "WebSearch"
     return last_name, last_result
 
 
@@ -395,6 +318,16 @@ def _count_tool_calls(messages: list, tool_name: str) -> int:
             if fn.get("name", "").lower() == tool_name.lower():
                 count += 1
     return count
+
+
+def _count_web_search_results(messages: list) -> int:
+    return sum(
+        1
+        for msg in messages
+        if isinstance(msg, dict)
+        and msg.get("role") == "tool"
+        and _looks_like_web_search_result(_content_to_plain_text(msg.get("content", "")))
+    )
 
 
 def _find_tool_name(names: list[str], wanted: str) -> str:
@@ -422,13 +355,22 @@ def _looks_like_web_search_request(text: str) -> bool:
 
 def _looks_like_empty_search_result(text: str) -> bool:
     lowered = _normalize_ws(text).lower()
-    return any(token in lowered for token in (
+    if any(token in lowered for token in (
         "did 0 searches",
         "0 searches",
         "no search results",
         "no results",
         "không có kết quả",
-    ))
+    )):
+        return True
+    if "web search results for query:" in lowered and "reminder:" in lowered:
+        result_part = lowered.split("reminder:", 1)[0]
+        return "http://" not in result_part and "https://" not in result_part and "](" not in result_part
+    return False
+
+
+def _looks_like_web_search_result(text: str) -> bool:
+    return "web search results for query:" in _normalize_ws(text).lower()
 
 
 def _action_hint_for_messages(messages: list, tools: list | None, tool_choice=None) -> str:
@@ -439,7 +381,7 @@ def _action_hint_for_messages(messages: list, tools: list | None, tool_choice=No
 
     last_tool_name, last_tool_result = _last_tool_result(messages)
     if last_tool_name.lower() == web_search.lower() and _looks_like_empty_search_result(last_tool_result):
-        search_count = _count_tool_calls(messages, web_search)
+        search_count = max(_count_tool_calls(messages, web_search), _count_web_search_results(messages))
         if search_count < 2:
             return (
                 f"The previous {web_search} result had no results. Retry {web_search} once "
@@ -464,7 +406,10 @@ def flatten_messages(messages: list, tools: list | None = None, tool_choice=None
 
     if tools:
         tool_desc = format_tools_prompt(tools)
-        parts.append(f"[System]\n{TOOL_CALL_INSTRUCTION}\n\nAvailable tools:\n{tool_desc}{_tool_choice_instruction(tool_choice)}")
+        parts.append(
+            f"[System]\n{TOOL_CALL_INSTRUCTION}\n\n"
+            f"Available tools:\n{tool_desc}{_tool_choice_instruction(tool_choice)}"
+        )
 
     for msg in messages:
         role = msg.get("role", "user")
@@ -474,11 +419,6 @@ def flatten_messages(messages: list, tools: list | None = None, tool_choice=None
             content = " ".join(
                 p.get("text", "") for p in content if p.get("type") == "text"
             )
-
-        if role == "system":
-            content = _compact_system_message(content)
-        elif role == "user":
-            content = _compact_user_context(content)
 
         if role == "system":
             parts.append(f"[System]\n{content}")
@@ -600,16 +540,13 @@ def get_or_create_chat(jwt: str, model: str) -> str:
 def _truncate_conversation(messages: list, tools: list | None, max_chars: int) -> list:
     """Truncate conversation history so the flattened prompt fits max_chars.
 
-    Uses actual flatten_messages() output length for accurate measurement,
-    since system messages get heavily compacted during flattening.
-
-    Strategy: progressively remove the oldest non-system messages from the
-    middle of the conversation (keeping first 2 + last N).
+    Disabled when max_chars <= 0.
     """
+    if max_chars <= 0:
+        return messages
     if not messages or len(messages) <= 4:
         return messages
 
-    # Check actual flattened size — this accounts for system compaction
     prompt = flatten_messages(messages, tools)
     if len(prompt) <= max_chars:
         return messages
@@ -902,13 +839,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         model, thinking_mode = resolve_model(upstream_model_name)
         messages = _truncate_conversation(messages, tools, MAX_PROMPT_CHARS)
         prompt = flatten_messages(messages, tools, tool_choice)
+        tool_names = _tool_names_from_tools(tools)
         log_event(
             "prompt_info",
             chars=len(prompt),
             messages=len(messages),
             model=model,
             has_tools=has_tools,
-            tools=_tool_names_from_tools(tools)[:12],
+            tool_count=len(tool_names),
+            tools=tool_names,
             action_hint=_action_hint_for_messages(messages, tools, tool_choice),
         )
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -1012,7 +951,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._start_sse()
             self._write_sse(make_chunk(completion_id, model, {"role": "assistant"}).encode())
             sieve = toolstream.ToolStreamSieve(tools, context=prompt)
-            pending_text = []
+            streamed_text = []
+            text_streamed = False
 
             for raw_line in upstream:
                 line = raw_line.decode("utf-8", errors="replace").strip()
@@ -1036,7 +976,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     continue
                 for evt in sieve.feed(content):
                     if evt.content:
-                        pending_text.append(evt.content)
+                        streamed_text.append(evt.content)
+                        self._write_sse(make_chunk(completion_id, model, {"content": evt.content}).encode())
+                        text_streamed = True
                     if evt.tool_calls:
                         log_event("tool_parse_ok", source="stream", count=len(evt.tool_calls))
                         self._write_stream_tool_calls(completion_id, model, evt.tool_calls)
@@ -1046,7 +988,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
             for evt in sieve.flush():
                 if evt.content:
-                    pending_text.append(evt.content)
+                    streamed_text.append(evt.content)
+                    self._write_sse(make_chunk(completion_id, model, {"content": evt.content}).encode())
+                    text_streamed = True
                 if evt.tool_calls:
                     log_event("tool_parse_ok", source="stream_flush", count=len(evt.tool_calls))
                     self._write_stream_tool_calls(completion_id, model, evt.tool_calls)
@@ -1055,7 +999,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     return
 
             # No tool calls detected — try recovery, then retry
-            full_text = "".join(pending_text)
+            full_text = "".join(streamed_text)
             dropped = sieve.buffer or sieve.dropped_markup
             fallback_calls = (
                 toolcall.infer_tool_calls_from_context(tools, prompt, full_text or dropped)
@@ -1081,9 +1025,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     return
 
             _log_no_tool_response("stream", prompt, full_text, dropped)
-            full_text = _sanitize_and_log_assistant_text("stream", full_text, tools)
-
-            if full_text:
+            if text_streamed:
+                _sanitize_and_log_assistant_text("stream", full_text, tools)
+            else:
+                full_text = _sanitize_and_log_assistant_text("stream", full_text, tools)
+            if full_text and not text_streamed:
                 self._write_sse(make_chunk(completion_id, model, {"content": full_text}).encode())
             self._write_sse(make_chunk(completion_id, model, {}, finish_reason="stop").encode())
             self._write_sse(b"data: [DONE]\n\n")
@@ -1172,13 +1118,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         model, thinking_mode = resolve_model(upstream_model_name)
         messages = _truncate_conversation(req.get("messages", []), tools, MAX_PROMPT_CHARS)
         prompt = flatten_messages(messages, tools, req.get("tool_choice"))
+        tool_names = _tool_names_from_tools(tools)
         log_event(
             "prompt_info",
             chars=len(prompt),
             messages=len(messages),
             model=model,
             has_tools=bool(tools),
-            tools=_tool_names_from_tools(tools)[:12],
+            tool_count=len(tool_names),
+            tools=tool_names,
             action_hint=_action_hint_for_messages(messages, tools, req.get("tool_choice")),
         )
         try:
@@ -1380,11 +1328,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             for evt in events:
                 if evt.content:
                     streamed_text.append(evt.content)
-                    if not has_tools:
-                        if not text_started:
-                            self._write_sse(anthropic.stream_text_block_start(block_index))
-                            text_started = True
-                        self._write_sse(anthropic.stream_text_delta(evt.content, block_index))
+                    if not text_started:
+                        self._write_sse(anthropic.stream_text_block_start(block_index))
+                        text_started = True
+                    self._write_sse(anthropic.stream_text_delta(evt.content, block_index))
                 if evt.tool_calls:
                     log_event("tool_parse_ok", source="anthropic_stream", count=len(evt.tool_calls))
                     if text_started:
@@ -1402,11 +1349,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             for evt in sieve.flush():
                 if evt.content:
                     streamed_text.append(evt.content)
-                    if not has_tools:
-                        if not text_started:
-                            self._write_sse(anthropic.stream_text_block_start(block_index))
-                            text_started = True
-                        self._write_sse(anthropic.stream_text_delta(evt.content, block_index))
+                    if not text_started:
+                        self._write_sse(anthropic.stream_text_block_start(block_index))
+                        text_started = True
+                    self._write_sse(anthropic.stream_text_delta(evt.content, block_index))
                 if evt.tool_calls:
                     log_event("tool_parse_ok", source="anthropic_stream_flush", count=len(evt.tool_calls))
                     if text_started:

@@ -11,6 +11,8 @@ Dùng Qwen models (qwen3.7-max, qwen3.7-plus, qwen3.6-plus, qwen3.6-max, qwen3.6
 - 3 chế độ thinking: `auto`, `thinking` (luôn suy luận), `fast` (không suy luận)
 - Streaming support (SSE)
 - Tool calling (function calling) — OpenAI format
+- Raw mode mặc định: dùng đúng model client yêu cầu, không tự đổi model khi có tools
+- Auto-retry khi Qwen upstream trả response rỗng hoặc text từ chối gọi tool
 - Zero dependencies — chỉ cần Python 3.11+
 - Stateless — mỗi request tạo chat session mới
 
@@ -35,13 +37,13 @@ Không cần `pip install` gì cả — project chỉ dùng Python stdlib.
 ## Chạy Proxy
 
 ```bash
-QWEN_JWT="your-jwt-token-here" python3 qwen_proxy/qwen_proxy.py --port 8080
+QWEN_JWT="your-jwt-token-here" python3 qwen_proxy.py --port 8080
 ```
 
 Hoặc chạy background:
 
 ```bash
-QWEN_JWT="your-jwt-token" python3 qwen_proxy/qwen_proxy.py --port 8080 &
+QWEN_JWT="your-jwt-token" python3 qwen_proxy.py --port 8080 &
 ```
 
 Kiểm tra:
@@ -168,6 +170,7 @@ qwen_proxy/
 - Proxy listen `127.0.0.1` mặc định. Dùng `--host 0.0.0.0` để expose ra ngoài.
 - Mỗi request tạo chat session mới trên Qwen (stateless).
 - JWT token hết hạn sau ~30 ngày — cần lấy lại từ browser.
+- Entry point chính chạy raw mode. Nếu cần bản server cũ, chạy module `qwen_proxy.server` trực tiếp.
 - Suffix `-thinking` và `-fast` hoạt động với tất cả models.
 - Không có suffix = Auto mode.
 

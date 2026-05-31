@@ -157,6 +157,41 @@ EOF
         self.assertIn("mpd.conf", args["command"])
         self.assertNotIn("code", args)
 
+    def test_parses_direct_argument_tags_inside_invoke(self):
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "Edit",
+                "parameters": {
+                    "type": "object",
+                    "required": ["file_path", "old_string", "new_string"],
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "old_string": {"type": "string"},
+                        "new_string": {"type": "string"},
+                    },
+                },
+            },
+        }]
+        text = """
+Giờ cập nhật run_round:
+
+<tool_calls>
+  <invoke name="Edit">
+    <parameter name="file_path"><![CDATA[/home/dangnosuy/Documents/LaiXe/moodle_quiz_auto.py]]></parameter>
+    <old_string><![CDATA[answered = save_all_answers(fixed_answer=fixed_answer)]]></old_string>
+    <new_string><![CDATA[answered = save_all_answers(fixed_answer=fixed_answer, total_slots=TOTAL_SLOTS)]]></new_string>
+  </invoke>
+</tool_calls>
+"""
+        calls = parse_tool_calls(text, tools)
+        args = json.loads(calls[0]["function"]["arguments"])
+
+        self.assertEqual(calls[0]["function"]["name"], "Edit")
+        self.assertEqual(args["file_path"], "/home/dangnosuy/Documents/LaiXe/moodle_quiz_auto.py")
+        self.assertIn("total_slots=TOTAL_SLOTS", args["new_string"])
+        self.assertIn("save_all_answers", args["old_string"])
+
     def test_repairs_truncated_parameter_equals_code_markup(self):
         tools = [{
             "type": "function",
@@ -204,6 +239,31 @@ EOF
         self.assertEqual(calls[0]["function"]["name"], "WebSearch")
         self.assertEqual(args["query"], "site:vnexpress.net tin mới nhất")
         self.assertNotIn("queries", args)
+
+    def test_repairs_direct_query_tag_closed_as_parameter(self):
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "WebSearch",
+                "parameters": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {"query": {"type": "string"}},
+                },
+            },
+        }]
+        text = """
+<tool_calls>
+  <invoke name="WebSearch">
+    <query><![CDATA[Microsoft Office VBA macro security changes 2024 block internet macros MOTW]]></parameter>
+  </invoke>
+</tool_calls>
+"""
+        calls = parse_tool_calls(text, tools)
+        args = json.loads(calls[0]["function"]["arguments"])
+
+        self.assertEqual(calls[0]["function"]["name"], "WebSearch")
+        self.assertIn("Microsoft Office VBA", args["query"])
 
     def test_parses_legacy_single_tool_call_tag_from_web_output(self):
         tools = [{
@@ -560,8 +620,56 @@ EOF
         # Should not fabricate a Bash call from generic prose
         self.assertIsNone(calls)
 
-    def test_prose_recovery_prefers_url_over_prose(self):
-        """URL-based recovery takes priority over prose recovery."""
+    def test_url_in_final_answer_does_not_trigger_browser_recovery(self):
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "mcp__playwright__browser_navigate",
+                "parameters": {
+                    "type": "object",
+                    "required": ["url"],
+                    "properties": {"url": {"type": "string"}},
+                },
+            },
+        }]
+        calls = infer_tool_calls_from_context(
+            tools,
+            "Evaluate the macro malware report.",
+            (
+                "Đã đọc báo cáo. Kỹ thuật template injection dùng ví dụ "
+                "http://update/Doc1.dotm nhưng hiện nay bị MOTW và Office policy "
+                "chặn mạnh hơn, nên tính khả thi thấp."
+            ),
+        )
+
+        self.assertIsNone(calls)
+
+    def test_audit_text_with_past_navigation_does_not_trigger_browser_recovery(self):
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "mcp__playwright__browser_navigate",
+                "parameters": {
+                    "type": "object",
+                    "required": ["url"],
+                    "properties": {"url": {"type": "string"}},
+                },
+            },
+        }]
+        calls = infer_tool_calls_from_context(
+            tools,
+            "Audit notes/ops.md and do not open http://update/Doc1.dotm.",
+            (
+                "## Audit Report\n\n"
+                "Trong session trước, assistant đã vi phạm khi gọi "
+                "`mcp__playwright__browser_navigate` đến `http://update/Doc1.dotm` "
+                "dù user đã cấm rõ ràng."
+            ),
+        )
+
+        self.assertIsNone(calls)
+
+    def test_url_in_prose_without_tool_miss_does_not_trigger_recovery(self):
         tools = [{
             "type": "function",
             "function": {
@@ -581,11 +689,7 @@ EOF
             "Fetch https://example.com/data",
             "I'll run `curl https://example.com/data`.",
         )
-        self.assertIsNotNone(calls)
-        # Should use web_fetch with the URL, not bash with curl
-        self.assertEqual(calls[0]["function"]["name"], "web_fetch")
-        args = json.loads(calls[0]["function"]["arguments"])
-        self.assertEqual(args["url"], "https://example.com/data")
+        self.assertIsNone(calls)
 
 
 if __name__ == "__main__":

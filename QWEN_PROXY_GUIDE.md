@@ -3,18 +3,20 @@
 ## Khởi động
 
 ```bash
-QWEN_JWT="<jwt-token-của-bạn>" python3 qwen_proxy/qwen_proxy.py --port 8080
+QWEN_JWT="<jwt-token-của-bạn>" python3 qwen_proxy.py --port 8080
 ```
 
 Hoặc chạy background:
 
 ```bash
-QWEN_JWT="<jwt>" python3 qwen_proxy/qwen_proxy.py --port 8080 &
+QWEN_JWT="<jwt>" python3 qwen_proxy.py --port 8080 &
 ```
 
 ---
 
 ## Models
+
+Proxy mặc định chạy raw mode: client yêu cầu model nào thì gửi đúng model đó lên Qwen, không tự đổi sang tool model khác. Khi upstream trả response rỗng hoặc trả text kiểu từ chối gọi tool, proxy sẽ retry theo `QWEN_RAW_MAX_RETRIES` (mặc định `2`).
 
 Mỗi model có 3 chế độ thinking:
 
