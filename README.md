@@ -11,8 +11,9 @@ Dùng Qwen models (qwen3.7-max, qwen3.7-plus, qwen3.6-plus, qwen3.6-max, qwen3.6
 - 3 chế độ thinking: `auto`, `thinking` (luôn suy luận), `fast` (không suy luận)
 - Streaming support (SSE)
 - Tool calling (function calling) — OpenAI format
-- Raw mode mặc định: dùng đúng model client yêu cầu, không tự đổi model khi có tools
-- Auto-retry khi Qwen upstream trả response rỗng hoặc text từ chối gọi tool
+- Tool requests mặc định dùng stable upstream model (`QWEN_TOOL_MODEL`, default `qwen3.6-max-preview`)
+- Raw chat mode tùy chọn cho non-tool requests; tool requests vẫn fallback stable nếu không set `QWEN_RAW_TOOL_MODEL=none`
+- Auto-retry trong raw mode khi Qwen upstream trả response rỗng
 - Zero dependencies — chỉ cần Python 3.11+
 - Stateless — mỗi request tạo chat session mới
 
@@ -170,7 +171,8 @@ qwen_proxy/
 - Proxy listen `127.0.0.1` mặc định. Dùng `--host 0.0.0.0` để expose ra ngoài.
 - Mỗi request tạo chat session mới trên Qwen (stateless).
 - JWT token hết hạn sau ~30 ngày — cần lấy lại từ browser.
-- Entry point chính chạy raw mode. Nếu cần bản server cũ, chạy module `qwen_proxy.server` trực tiếp.
+- Entry point chính (`qwen_proxy.py`, `qwen-proxy`) chạy server mode qua `qwen_proxy.server`.
+- Raw mode là tùy chọn qua `qwen_proxy_raw.py`; mặc định raw mode cũng dùng stable tool fallback. Chỉ set `QWEN_RAW_TOOL_MODEL=none` nếu chấp nhận rủi ro tool model của client.
 - Suffix `-thinking` và `-fast` hoạt động với tất cả models.
 - Không có suffix = Auto mode.
 

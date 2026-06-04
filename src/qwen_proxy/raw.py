@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""Raw Qwen Proxy — model nào thì model đó + auto-retry on empty response.
+"""Qwen Proxy with optional raw model mode + auto-retry on empty response.
 
 Khác biệt so với qwen_proxy.py gốc:
-  - Luôn dùng đúng model mà client yêu cầu (qwen3.7-max → qwen3.7-max)
-  - KHÔNG có cơ chế select_upstream_model / TOOL_MODEL fallback
+  - Non-tool requests use the client model directly
+  - Tool requests default to the stable tool model, matching server.py
+  - Set QWEN_RAW_TOOL_MODEL=none to force client model for tool requests
   - Auto-retry lên đến MAX_EMPTY_RETRIES lần khi upstream trả empty
   - Vẫn giữ nguyên tool call parsing (XML → OpenAI format)
   - Vẫn giữ Anthropic compat, streaming, etc.
 
 Usage:
-    QWEN_JWT="eyJ..." python3 qwen_proxy.py [--port 8080] [--host 127.0.0.1]
+    QWEN_JWT="eyJ..." python3 -m qwen_proxy.raw [--port 8080] [--host 127.0.0.1]
 
 Env vars:
     QWEN_RAW_MAX_RETRIES  — max empty-response retries (default: 2)
+    QWEN_RAW_TOOL_MODEL   — tool upstream model, default qwen3.6-max-preview; set none for true raw
 """
 
 import argparse
@@ -32,16 +34,21 @@ import qwen_proxy.server as _srv
 # Configuration
 # ---------------------------------------------------------------------------
 MAX_EMPTY_RETRIES = int(os.environ.get("QWEN_RAW_MAX_RETRIES", "2"))
+RAW_TOOL_MODEL = os.environ.get("QWEN_RAW_TOOL_MODEL", _srv.DEFAULT_TOOL_MODEL).strip()
 
 
 def _raw_select_upstream_model(client_model: str, has_tools: bool) -> str:
-    """Raw mode: always return client_model regardless of tools."""
-    return client_model
+    """Raw mode for normal chat; stable model fallback for tool calls."""
+    if not has_tools:
+        return client_model
+    if RAW_TOOL_MODEL.lower() in {"", "request", "client", "none"}:
+        return client_model
+    return RAW_TOOL_MODEL
 
 
-# Monkey-patch: no model switching
+# Monkey-patch: keep raw normal chat, but preserve stable tool fallback by default.
 _srv.select_upstream_model = _raw_select_upstream_model
-_srv.TOOL_MODEL = "none"
+_srv.TOOL_MODEL = RAW_TOOL_MODEL
 
 # Enable tool recovery (infer tool calls from context when model fails)
 _srv.TOOL_RECOVERY = True
@@ -50,17 +57,14 @@ _srv.TOOL_RECOVERY = True
 def _should_retry(answer: str, has_tools: bool) -> bool:
     """Check if the response should trigger a retry.
 
-    Triggers on:
-    1. Empty response (stream cut short by Qwen server)
-    2. "Tool X does not exists" hallucination (model refuses to call tool)
-    3. "I'm unable to" / "cannot access" prose when tools are available
+    Only empty responses are retried. Text such as "Tool X does not exists"
+    should be handled by parser recovery/sanitization instead of another slow
+    upstream call.
     """
     text = (answer or "").strip()
     if not text:
         return True  # Empty response
-    if not has_tools:
-        return False  # No tools = no tool-related retry needed
-    return _srv._looks_like_failed_tool_text(text)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -148,12 +152,14 @@ class RawProxyHandler(_srv.ProxyHandler):
         in_tok = out_tok = 0
         while _should_retry(answer, has_tools) and retries < MAX_EMPTY_RETRIES:
             retries += 1
-            reason = "empty" if not answer.strip() else "tool_not_exists"
+            reason = "empty"
+            retry_model = _srv.select_upstream_model(model, has_tools)
             log_event("raw_retry", attempt=retries, model=model, reason=reason,
-                      source=source, preview=answer[:100] if answer else "(empty)")
+                      source=source, upstream_model=retry_model,
+                      preview=answer[:100] if answer else "(empty)")
             try:
-                _, thinking_mode = _srv.resolve_model(model)
-                new_upstream, new_conn = self._open_fresh_upstream(model, prompt, thinking_mode)
+                _, thinking_mode = _srv.resolve_model(retry_model)
+                new_upstream, new_conn = self._open_fresh_upstream(retry_model, prompt, thinking_mode)
                 if new_upstream.status != 200:
                     body = new_upstream.read().decode(errors="replace")
                     log_event("raw_retry_fail", attempt=retries, status=new_upstream.status,
@@ -199,16 +205,19 @@ class RawProxyHandler(_srv.ProxyHandler):
                                   tools: list | None, prompt: str = ""):
         """Anthropic SSE stream with auto-retry and tool recovery."""
 
+        if not self._start_sse():
+            return
+        if not self._write_sse(anthropic.stream_message_start(model)):
+            return
+
         # ---- Collect upstream fully (buffer) so we can retry if needed ----
         answer, thinking, in_tok, out_tok, raw_lines = self._collect_upstream_full(upstream)
 
-        # ---- Retry on empty or "Tool X does not exists" ----
+        # ---- Retry on empty upstream response only ----
         answer, thinking, in_tok, out_tok = self._retry_upstream(
             answer, has_tools, model, prompt, "anthropic_stream")
 
         # ---- Now stream the collected response to client ----
-        self._start_sse()
-        self._write_sse(anthropic.stream_message_start(model))
         text_started = False
         block_index = 0
 
@@ -263,15 +272,18 @@ class RawProxyHandler(_srv.ProxyHandler):
                        tools: list | None = None, prompt: str = ""):
         """OpenAI SSE stream with auto-retry and tool recovery."""
 
+        if not self._start_sse():
+            return
+        if not self._write_sse(_srv.make_chunk(completion_id, model, {"role": "assistant"}).encode()):
+            return
+
         answer, thinking, in_tok, out_tok, raw_lines = self._collect_upstream_full(upstream)
 
-        # Retry on empty or "Tool X does not exists"
+        # Retry on empty upstream response only
         answer, thinking, in_tok, out_tok = self._retry_upstream(
             answer, has_tools, model, prompt, "openai_stream")
 
         # Stream collected response
-        self._start_sse()
-        self._write_sse(_srv.make_chunk(completion_id, model, {"role": "assistant"}).encode())
 
         if has_tools and answer.strip():
             tool_calls = toolcall.parse_tool_calls(answer, tools, context=prompt)
@@ -314,7 +326,7 @@ class RawProxyHandler(_srv.ProxyHandler):
         """Non-streaming response with auto-retry and tool recovery."""
         answer, thinking, in_tok, out_tok, raw_lines = self._collect_upstream_full(upstream)
 
-        # Retry on empty or "Tool X does not exists"
+        # Retry on empty upstream response only
         answer, thinking, in_tok, out_tok = self._retry_upstream(
             answer, has_tools, model, prompt, "non_stream")
 
@@ -373,7 +385,7 @@ class RawProxyHandler(_srv.ProxyHandler):
 # Main
 # ---------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Qwen → OpenAI RAW proxy (no model switching + retry)")
+    parser = argparse.ArgumentParser(description="Qwen -> OpenAI raw-chat proxy with stable tool fallback")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--jwt", default=os.environ.get("QWEN_JWT", ""))
@@ -386,8 +398,8 @@ def main():
     RawProxyHandler.jwt = args.jwt
 
     server = http.server.ThreadingHTTPServer((args.host, args.port), RawProxyHandler)
-    print(f"Qwen RAW proxy listening on http://{args.host}:{args.port}")
-    print(f"   Mode: RAW - model nao thi model do, KHONG auto-switch")
+    print(f"Qwen proxy listening on http://{args.host}:{args.port}")
+    print(f"   Mode: raw normal chat + stable tool fallback")
     print(f"   Empty retries: {MAX_EMPTY_RETRIES}")
     print(f"   POST /v1/chat/completions")
     print(f"   POST /v1/messages")
@@ -395,7 +407,7 @@ def main():
     print(f"   GET  /v1/models")
     print(f"   GET  /health")
     print(f"   Default model: {_srv.DEFAULT_MODEL}")
-    print(f"   Tool model override: DISABLED (raw mode)")
+    print(f"   Tool upstream model: {RAW_TOOL_MODEL or 'request model'}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

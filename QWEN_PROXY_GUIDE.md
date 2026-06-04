@@ -16,7 +16,9 @@ QWEN_JWT="<jwt>" python3 qwen_proxy.py --port 8080 &
 
 ## Models
 
-Proxy mặc định chạy raw mode: client yêu cầu model nào thì gửi đúng model đó lên Qwen, không tự đổi sang tool model khác. Khi upstream trả response rỗng hoặc trả text kiểu từ chối gọi tool, proxy sẽ retry theo `QWEN_RAW_MAX_RETRIES` (mặc định `2`).
+Proxy mặc định chạy server mode qua `qwen_proxy.server`. Khi request có tools, upstream mặc định dùng stable tool model `qwen3.6-max-preview` (`QWEN_TOOL_MODEL`) để giữ tool parsing ổn định cho Claude Code và các agent runner.
+
+Raw mode là tùy chọn qua `qwen_proxy_raw.py`: non-tool requests dùng đúng model client yêu cầu, còn tool requests vẫn fallback stable theo `QWEN_RAW_TOOL_MODEL` mặc định. Chỉ set `QWEN_RAW_TOOL_MODEL=none` nếu muốn ép tool requests dùng model client và chấp nhận rủi ro lỗi kiểu `Tool Bash does not exists`. Raw mode chỉ retry khi upstream trả response rỗng, theo `QWEN_RAW_MAX_RETRIES` (mặc định `2`).
 
 Mỗi model có 3 chế độ thinking:
 

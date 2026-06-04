@@ -7,6 +7,7 @@ from qwen_proxy.server import (
     TOOL_MODEL,
     TOOL_RECOVERY,
     MODELS_LIST,
+    ProxyHandler,
     resolve_model,
     select_upstream_model,
 )
@@ -26,6 +27,30 @@ class ModelRegistryTests(unittest.TestCase):
         self.assertEqual(TOOL_MODEL, "qwen3.6-max-preview")
         self.assertEqual(select_upstream_model("qwen3.7-max", has_tools=True), "qwen3.6-max-preview")
         self.assertEqual(select_upstream_model("qwen3.7-max", has_tools=False), "qwen3.7-max")
+
+    def test_tool_retry_uses_stable_tool_model(self):
+        class DummyHandler(ProxyHandler):
+            opened_model = None
+
+            def _open_qwen_upstream_simple(self, prompt, model):
+                self.opened_model = model
+                return object(), None
+
+            def _collect_upstream(self, upstream):
+                return "", 0, 0
+
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "Bash",
+                "description": "Run shell commands",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }]
+        handler = object.__new__(DummyHandler)
+
+        self.assertIsNone(handler._retry_for_tool_calls(tools, "run pwd", "qwen3.7-max"))
+        self.assertEqual(handler.opened_model, DEFAULT_TOOL_MODEL)
 
     def test_resolves_thinking_and_fast_suffixes(self):
         self.assertEqual(resolve_model("qwen3.7-max-thinking"), ("qwen3.7-max", "thinking"))

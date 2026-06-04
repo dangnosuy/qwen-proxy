@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
-qwen-proxy = "qwen_proxy.raw:main"
+qwen-proxy = "qwen_proxy.server:main"
 
 [build-system]
 requires = ["setuptools>=68"]

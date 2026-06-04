@@ -36,9 +36,8 @@ QWEN_TIMEOUT = 180
 RETRY_ON_FAIL = os.environ.get("QWEN_RETRY_ON_FAIL", "0").strip() in {"1", "true", "yes"}
 TOOL_RECOVERY = os.environ.get("QWEN_TOOL_RECOVERY", "0").strip() in {"1", "true", "yes"}
 
-# Prompt auto-truncation is disabled by default. Claude Code already manages
-# its context, and this proxy should primarily translate tool calls. Set
-# QWEN_MAX_PROMPT_CHARS to a positive value only if a specific upstream needs it.
+# Prompt truncation is disabled. Claude Code already manages compaction, and
+# dropping messages here breaks tool-result continuity.
 MAX_PROMPT_CHARS = int(os.environ.get("QWEN_MAX_PROMPT_CHARS", "0"))
 
 # Session reuse TTL in seconds (P2). 0 = disabled (original behavior).
@@ -340,17 +339,21 @@ def _find_tool_name(names: list[str], wanted: str) -> str:
 
 def _looks_like_web_search_request(text: str) -> bool:
     lowered = _normalize_ws(text).lower()
-    return any(token in lowered for token in (
+    explicit_web_markers = (
         "google",
         "web search",
         "search web",
-        "tìm kiếm",
         "tìm trên web",
-        "tìm bài",
-        "vnexpress",
-        "mới nhất",
-        "latest",
-    ))
+        "tìm kiếm web",
+        "tìm web",
+        "tìm trên internet",
+        "tìm internet",
+        "tra cứu internet",
+        "tra cứu trên mạng",
+        "trên mạng",
+        "online",
+    )
+    return any(token in lowered for token in explicit_web_markers)
 
 
 def _looks_like_empty_search_result(text: str) -> bool:
@@ -392,7 +395,8 @@ def _action_hint_for_messages(messages: list, tools: list | None, tool_choice=No
             "Do not claim unrelated capabilities do not exist."
         )
 
-    if _looks_like_web_search_request(_latest_user_text(messages)):
+    latest_user_text = _latest_user_text(messages)
+    if _looks_like_web_search_request(latest_user_text):
         return (
             f"The latest user request is a web search. Use {web_search} first with a concise query "
             "derived from the user text. Do not answer from memory."
@@ -538,55 +542,14 @@ def get_or_create_chat(jwt: str, model: str) -> str:
 
 
 def _truncate_conversation(messages: list, tools: list | None, max_chars: int) -> list:
-    """Truncate conversation history so the flattened prompt fits max_chars.
+    """Return the conversation unchanged.
 
-    Disabled when max_chars <= 0.
+    Claude Code owns context compaction. The proxy must preserve the exact
+    message/tool-result sequence so tool loops remain coherent.
     """
-    if max_chars <= 0:
-        return messages
-    if not messages or len(messages) <= 4:
-        return messages
-
-    prompt = flatten_messages(messages, tools)
-    if len(prompt) <= max_chars:
-        return messages
-
-    original_prompt_len = len(prompt)
-
-    # Separate system messages from conversation
-    system_msgs = [m for m in messages if m.get("role") == "system"]
-    conv_msgs = [m for m in messages if m.get("role") != "system"]
-
-    if len(conv_msgs) <= 4:
-        return messages  # Too few to truncate meaningfully
-
-    # Keep first 2 conversation messages + progressively fewer trailing messages
-    first = conv_msgs[:2]
-    remaining = conv_msgs[2:]
-
-    for cut in range(1, len(remaining)):
-        candidate = system_msgs + first + remaining[cut:]
-        prompt = flatten_messages(candidate, tools)
-        if len(prompt) <= max_chars:
-            log_event("prompt_truncate",
-                       original_messages=len(messages),
-                       kept_messages=len(candidate),
-                       removed_messages=cut,
-                       original_prompt_chars=original_prompt_len,
-                       truncated_prompt_chars=len(prompt))
-            return candidate
-
-    # Last resort: system + last 2 conversation messages only
-    last2 = conv_msgs[-2:]
-    candidate = system_msgs + last2
-    prompt = flatten_messages(candidate, tools)
-    log_event("prompt_truncate",
-               original_messages=len(messages),
-               kept_messages=len(candidate),
-               removed_messages=len(conv_msgs) - 2,
-               original_prompt_chars=original_prompt_len,
-               truncated_prompt_chars=len(prompt))
-    return candidate
+    if max_chars > 0:
+        log_event("prompt_truncate_disabled", max_prompt_chars=max_chars, messages=len(messages))
+    return messages
 
 
 def _summarize_tool_calls(calls: list[dict]) -> list[dict]:
@@ -761,12 +724,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _send_json(self, code: int, obj: dict):
         body = json.dumps(obj, ensure_ascii=False).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            log_event(
+                "client_disconnect",
+                path=getattr(self, "path", ""),
+                response_code=code,
+                bytes=len(body),
+            )
 
     def _send_error(self, code: int, message: str):
         self._send_json(code, {
@@ -778,11 +749,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         return self.rfile.read(length) if length else b""
 
     def do_OPTIONS(self):
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "*")
-        self.end_headers()
+        try:
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "*")
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError):
+            log_event("client_disconnect", path=getattr(self, "path", ""), response_type="options")
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -799,6 +773,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(200, {"status": "ok"})
         else:
             self._send_error(404, "Not found")
+
+    def do_HEAD(self):
+        path = urlparse(self.path).path
+        code = 200 if path in {"/", "/health", "/v1/models", "/models", "/anthropic/v1/models"} else 404
+        try:
+            self.send_response(code)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError):
+            log_event("client_disconnect", path=getattr(self, "path", ""), response_type="head", response_code=code)
 
     def do_POST(self):
         path = urlparse(self.path).path
@@ -920,19 +904,37 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 output_tokens = usage["output_tokens"]
         return full_content, input_tokens, output_tokens
 
-    def _write_sse(self, data: bytes):
+    def _write_sse(self, data: bytes) -> bool:
         try:
             self.wfile.write(data)
             self.wfile.flush()
-        except BrokenPipeError:
-            pass
+            return True
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+            log_event(
+                "client_disconnect",
+                path=getattr(self, "path", ""),
+                response_type="sse",
+                bytes=len(data),
+            )
+            return False
 
-    def _start_sse(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
+    def _start_sse(self) -> bool:
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            return True
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+            log_event(
+                "client_disconnect",
+                path=getattr(self, "path", ""),
+                response_type="sse_headers",
+            )
+            return False
 
     def _write_stream_tool_calls(self, completion_id: str, model: str, calls: list[dict]):
         for i, tc in enumerate(calls):
@@ -948,8 +950,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _handle_stream(self, upstream, completion_id: str, model: str, thinking_mode: str, has_tools: bool = False, tools: list | None = None, prompt: str = ""):
         if has_tools:
-            self._start_sse()
-            self._write_sse(make_chunk(completion_id, model, {"role": "assistant"}).encode())
+            if not self._start_sse():
+                return
+            if not self._write_sse(make_chunk(completion_id, model, {"role": "assistant"}).encode()):
+                return
             sieve = toolstream.ToolStreamSieve(tools, context=prompt)
             streamed_text = []
             text_streamed = False
@@ -977,7 +981,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 for evt in sieve.feed(content):
                     if evt.content:
                         streamed_text.append(evt.content)
-                        self._write_sse(make_chunk(completion_id, model, {"content": evt.content}).encode())
+                        if not self._write_sse(make_chunk(completion_id, model, {"content": evt.content}).encode()):
+                            return
                         text_streamed = True
                     if evt.tool_calls:
                         log_event("tool_parse_ok", source="stream", count=len(evt.tool_calls))
@@ -989,7 +994,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             for evt in sieve.flush():
                 if evt.content:
                     streamed_text.append(evt.content)
-                    self._write_sse(make_chunk(completion_id, model, {"content": evt.content}).encode())
+                    if not self._write_sse(make_chunk(completion_id, model, {"content": evt.content}).encode()):
+                        return
                     text_streamed = True
                 if evt.tool_calls:
                     log_event("tool_parse_ok", source="stream_flush", count=len(evt.tool_calls))
@@ -1035,8 +1041,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._write_sse(b"data: [DONE]\n\n")
             return
 
-        self._start_sse()
-        self._write_sse(make_chunk(completion_id, model, {"role": "assistant"}).encode())
+        if not self._start_sse():
+            return
+        if not self._write_sse(make_chunk(completion_id, model, {"role": "assistant"}).encode()):
+            return
 
         for raw_line in upstream:
             line = raw_line.decode("utf-8", errors="replace").strip()
@@ -1059,7 +1067,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if phase == "answer" or not phase:
                 content = delta.get("content", "")
                 if content:
-                    self._write_sse(make_chunk(completion_id, model, {"content": content}).encode())
+                    if not self._write_sse(make_chunk(completion_id, model, {"content": content}).encode()):
+                        return
 
         self._write_sse(make_chunk(completion_id, model, {}, finish_reason="stop").encode())
         self._write_sse(b"data: [DONE]\n\n")
@@ -1196,6 +1205,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         """
         if not tools:
             return None
+        retry_model = select_upstream_model(model, bool(tools))
 
         # Build a much shorter prompt with just tool instruction + key context
         retry_prompt = (
@@ -1212,9 +1222,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         else:
             retry_prompt += original_prompt
 
-        log_event("retry_attempt", prompt_chars=len(retry_prompt), model=model)
+        log_event("retry_attempt", prompt_chars=len(retry_prompt), model=retry_model)
 
-        upstream, err = self._open_qwen_upstream_simple(retry_prompt, model)
+        upstream, err = self._open_qwen_upstream_simple(retry_prompt, retry_model)
         if err:
             log_event("retry_fail", error=err)
             return None
@@ -1297,8 +1307,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self._send_json(200, anthropic.from_openai_response(openai_resp, model))
 
     def _handle_anthropic_stream(self, upstream, model: str, has_tools: bool, tools: list | None, prompt: str = ""):
-        self._start_sse()
-        self._write_sse(anthropic.stream_message_start(model))
+        if not self._start_sse():
+            return
+        if not self._write_sse(anthropic.stream_message_start(model)):
+            return
         text_started = False
         block_index = 0
         sieve = toolstream.ToolStreamSieve(tools, context=prompt) if has_tools else None
@@ -1329,9 +1341,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 if evt.content:
                     streamed_text.append(evt.content)
                     if not text_started:
-                        self._write_sse(anthropic.stream_text_block_start(block_index))
+                        if not self._write_sse(anthropic.stream_text_block_start(block_index)):
+                            return
                         text_started = True
-                    self._write_sse(anthropic.stream_text_delta(evt.content, block_index))
+                    if not self._write_sse(anthropic.stream_text_delta(evt.content, block_index)):
+                        return
                 if evt.tool_calls:
                     log_event("tool_parse_ok", source="anthropic_stream", count=len(evt.tool_calls))
                     if text_started:
@@ -1350,9 +1364,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 if evt.content:
                     streamed_text.append(evt.content)
                     if not text_started:
-                        self._write_sse(anthropic.stream_text_block_start(block_index))
+                        if not self._write_sse(anthropic.stream_text_block_start(block_index)):
+                            return
                         text_started = True
-                    self._write_sse(anthropic.stream_text_delta(evt.content, block_index))
+                    if not self._write_sse(anthropic.stream_text_delta(evt.content, block_index)):
+                        return
                 if evt.tool_calls:
                     log_event("tool_parse_ok", source="anthropic_stream_flush", count=len(evt.tool_calls))
                     if text_started:

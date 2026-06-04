@@ -1,6 +1,6 @@
 import unittest
 
-from qwen_proxy.server import _sanitize_assistant_text, flatten_messages
+from qwen_proxy.server import _sanitize_assistant_text, _truncate_conversation, flatten_messages
 
 
 class PromptRenderingTests(unittest.TestCase):
@@ -186,6 +186,80 @@ class PromptRenderingTests(unittest.TestCase):
         self.assertIn("The latest user request is a web search", prompt)
         self.assertIn("Use WebSearch first", prompt)
         self.assertIn("Do not answer from memory", prompt)
+
+    def test_local_search_request_does_not_get_web_search_hint(self):
+        prompt = flatten_messages([
+            {
+                "role": "user",
+                "content": (
+                    "dùng phantom_rce.py đọc cấu trúc thư mục và bắt đầu tìm kiếm "
+                    "phiên bản production trong codebase"
+                ),
+            },
+        ], tools=[{
+            "type": "function",
+            "function": {
+                "name": "WebSearch",
+                "description": "Search the web",
+                "parameters": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {"query": {"type": "string"}},
+                },
+            },
+        }, {
+            "type": "function",
+            "function": {
+                "name": "Read",
+                "description": "Read a local file",
+                "parameters": {
+                    "type": "object",
+                    "required": ["file_path"],
+                    "properties": {"file_path": {"type": "string"}},
+                },
+            },
+        }])
+
+        self.assertNotIn("The latest user request is a web search", prompt)
+        self.assertNotIn("Use WebSearch first", prompt)
+
+    def test_current_info_words_without_explicit_web_do_not_force_web_search(self):
+        prompt = flatten_messages([
+            {"role": "user", "content": "tìm phiên bản production mới nhất đang chạy"},
+        ], tools=[{
+            "type": "function",
+            "function": {
+                "name": "WebSearch",
+                "description": "Search the web",
+                "parameters": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {"query": {"type": "string"}},
+                },
+            },
+        }])
+
+        self.assertNotIn("The latest user request is a web search", prompt)
+        self.assertNotIn("Use WebSearch first", prompt)
+
+    def test_proxy_does_not_truncate_claude_code_history(self):
+        messages = [
+            {"role": "system", "content": "system context"},
+            {"role": "user", "content": "first user"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "Read", "arguments": '{"file_path":"/tmp/a"}'},
+                }],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "tool result"},
+            {"role": "user", "content": "continue"},
+        ]
+
+        self.assertIs(_truncate_conversation(messages, tools=None, max_chars=10), messages)
 
     def test_empty_web_search_result_gets_one_retry_hint(self):
         prompt = flatten_messages([
